@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    image: ccr.ccs.tencentyun.com/auto-meican/meican:arm64
+    container_name: auto-meican-app
+    ports:
+      - "8000:8000"
+    environment:
+      - MEICAN_GLOBAL_PASSWORD=${MEICAN_GLOBAL_PASSWORD:-your_default_password}
+      - DJANGO_DEBUG=True
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-django-insecure-docker-dev-key}
+    volumes:
+      - ~/.meican:/app/data
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
