@@ -1,7 +1,6 @@
 services:
   app:
     build: .
-    image: ccr.ccs.tencentyun.com/auto-meican/meican:arm64
     container_name: auto-meican-app
     ports:
       - "8000:8000"
