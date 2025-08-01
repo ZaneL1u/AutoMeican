@@ -66,21 +66,23 @@ def _order_for_user(user, date):
 
     try:
         # 使用新的整合方法直接查找并下单自助午餐
-        success, result_data, error_msg = meican_service.find_and_order_buffet(user.email)
+        success, result_data, error_msg = meican_service.find_and_order_buffet(
+            user.email
+        )
 
         print(f"下单结果: {'成功' if success else '失败'}")
 
         if success:
             # 处理成功的新订单
-            if 'successful_orders' in result_data and result_data['successful_orders']:
-                for order_info in result_data['successful_orders']:
+            if "successful_orders" in result_data and result_data["successful_orders"]:
+                for order_info in result_data["successful_orders"]:
                     # order_info 格式: "时段名称: 菜品名称"
-                    if ': ' in order_info:
-                        meal_period, meal_name = order_info.split(': ', 1)
+                    if ": " in order_info:
+                        meal_period, meal_name = order_info.split(": ", 1)
                     else:
                         meal_period = "未知时段"
                         meal_name = order_info
-                    
+
                     # 记录成功的订单
                     OrderRecord.objects.update_or_create(
                         user=user,
@@ -92,7 +94,9 @@ def _order_for_user(user, date):
                             "error_message": None,
                         },
                     )
-                    logger.info(f"用户 {user.email} 在 {date_str} {meal_period} 成功下单: {meal_name}")
+                    logger.info(
+                        f"用户 {user.email} 在 {date_str} {meal_period} 成功下单: {meal_name}"
+                    )
 
             # 更新用户最后登录时间
             user.last_login_attempt = timezone.now()

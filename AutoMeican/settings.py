@@ -159,7 +159,7 @@ LOGGING = {
         "file": {
             "level": "INFO",
             "class": "logging.FileHandler",
-            "filename": "data/logs/meican_orders.log",
+            "filename": "/app/data/logs/meican_orders.log",
             "formatter": "verbose",
         },
         "console": {
