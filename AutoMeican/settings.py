@@ -42,7 +42,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django_crontab",
-    "meican",
+    "meican.apps.MeicanConfig",
 ]
 
 MIDDLEWARE = [
@@ -177,7 +177,16 @@ LOGGING = {
     },
 }
 
-CRONJOBS = [
-    ("0 9 * * *", "meican.cron.auto_order_meals", ">> data/logs/meican_cron.log 2>&1"),
-    ("0 17 * * *", "meican.cron.auto_order_meals", ">> data/logs/meican_cron.log 2>&1"),
-]
+CRON_SCHEDULES = os.environ.get("CRON_SCHEDULES", "0 9 * * *;0 17 * * *")
+
+CRONJOBS = []
+for schedule in CRON_SCHEDULES.split(";"):
+    schedule = schedule.strip()
+    if schedule:
+        CRONJOBS.append(
+            (
+                schedule,
+                "meican.cron.auto_order_meals",
+                ">> data/logs/meican_cron.log 2>&1",
+            )
+        )
