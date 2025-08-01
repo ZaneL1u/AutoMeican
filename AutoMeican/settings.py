@@ -187,6 +187,6 @@ for schedule in CRON_SCHEDULES.split(";"):
             (
                 schedule,
                 "meican.cron.auto_order_meals",
-                ">> data/logs/meican_cron.log 2>&1",
+                ">> /app/data/logs/meican_cron.log 2>&1",
             )
         )

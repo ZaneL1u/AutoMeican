@@ -148,12 +148,19 @@ class MeicanService:
             if successful_orders:
                 result_messages.append(f"新订餐成功: {', '.join(successful_orders)}")
 
+            # 返回成功的订单列表和已有订单列表，用于后续的数据库记录
+            return_data = {
+                'successful_orders': successful_orders,
+                'ordered_meals': ordered_meals,
+                'message': "; ".join(result_messages) if result_messages else "没有找到可订购的自助餐"
+            }
+
             if successful_orders:
-                return True, "; ".join(result_messages), ""
+                return True, return_data, ""
             elif ordered_meals:
-                return False, "", "; ".join(result_messages)
+                return True, return_data, ""  # 即使只有已有订单，也算成功，因为不需要重复点餐
             else:
-                return False, "", "没有找到可订购的自助餐"
+                return False, return_data, "没有找到可订购的自助餐"
 
         except NoOrderAvailable as e:
             logger.error(f"没有可用订单: {e}")

@@ -35,16 +35,7 @@ def auto_order_meals():
 
         for user in active_users:
             try:
-                # 检查该用户该日期是否已经下过单
-                existing_order = OrderRecord.objects.filter(
-                    user=user, order_date=date, success=True
-                ).first()
-
-                if existing_order:
-                    logger.info(f"用户 {user.email} 在 {date_str} 已有成功订单，跳过")
-                    continue
-
-                # 为该用户下单
+                # 为该用户下单（让 meican_service 处理具体的时段检查）
                 success, error_msg = _order_for_user(user, date)
 
                 if success:
@@ -75,39 +66,46 @@ def _order_for_user(user, date):
 
     try:
         # 使用新的整合方法直接查找并下单自助午餐
-        success, dish_name, error_msg = meican_service.find_and_order_buffet(user.email)
+        success, result_data, error_msg = meican_service.find_and_order_buffet(user.email)
 
         print(f"下单结果: {'成功' if success else '失败'}")
 
         if success:
-            if dish_name:
-                # 成功下单
-                OrderRecord.objects.update_or_create(
-                    user=user,
-                    order_date=date,
-                    defaults={
-                        "meal_name": dish_name,
-                        "success": True,
-                        "error_message": None,
-                    },
-                )
+            # 处理成功的新订单
+            if 'successful_orders' in result_data and result_data['successful_orders']:
+                for order_info in result_data['successful_orders']:
+                    # order_info 格式: "时段名称: 菜品名称"
+                    if ': ' in order_info:
+                        meal_period, meal_name = order_info.split(': ', 1)
+                    else:
+                        meal_period = "未知时段"
+                        meal_name = order_info
+                    
+                    # 记录成功的订单
+                    OrderRecord.objects.update_or_create(
+                        user=user,
+                        order_date=date,
+                        meal_period=meal_period,
+                        defaults={
+                            "meal_name": meal_name,
+                            "success": True,
+                            "error_message": None,
+                        },
+                    )
+                    logger.info(f"用户 {user.email} 在 {date_str} {meal_period} 成功下单: {meal_name}")
 
-                logger.info(f"用户 {user.email} 在 {date_str} 成功下单: {dish_name}")
+            # 更新用户最后登录时间
+            user.last_login_attempt = timezone.now()
+            user.save()
 
-                # 更新用户最后登录时间
-                user.last_login_attempt = timezone.now()
-                user.save()
-
-                return True, None
-            else:
-                # 没有找到自助午餐，但不算错误
-                logger.info(f"用户 {user.email} 在 {date_str} 没有找到自助午餐")
-                return True, None
+            # 如果有任何成功的操作（新订单或已有订单），都算作成功
+            return True, None
         else:
-            # 下单失败
+            # 下单失败，记录错误
             OrderRecord.objects.update_or_create(
                 user=user,
                 order_date=date,
+                meal_period="自动点餐",
                 defaults={
                     "meal_name": "",
                     "success": False,
@@ -121,6 +119,7 @@ def _order_for_user(user, date):
         OrderRecord.objects.update_or_create(
             user=user,
             order_date=date,
+            meal_period="自动点餐",
             defaults={"meal_name": "", "success": False, "error_message": error_msg},
         )
         return False, error_msg

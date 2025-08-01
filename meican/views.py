@@ -24,22 +24,40 @@ class MeicanUsersView(View):
 
         users_with_status = []
         for user in users:
-            # 获取今天的订单状态
-            today_order = OrderRecord.objects.filter(
+            # 获取今天的所有成功订单
+            today_orders = OrderRecord.objects.filter(
                 user=user, order_date=today, success=True
-            ).first()
+            )
 
-            # 获取明天的订单状态
-            tomorrow_order = OrderRecord.objects.filter(
+            # 获取明天的所有成功订单
+            tomorrow_orders = OrderRecord.objects.filter(
                 user=user, order_date=tomorrow, success=True
-            ).first()
+            )
+
+            # 合并今天的订单信息
+            today_meals = []
+            if today_orders.exists():
+                for order in today_orders:
+                    if order.meal_period:
+                        today_meals.append(f"{order.meal_period}: {order.meal_name}")
+                    else:
+                        today_meals.append(order.meal_name)
+
+            # 合并明天的订单信息
+            tomorrow_meals = []
+            if tomorrow_orders.exists():
+                for order in tomorrow_orders:
+                    if order.meal_period:
+                        tomorrow_meals.append(f"{order.meal_period}: {order.meal_name}")
+                    else:
+                        tomorrow_meals.append(order.meal_name)
 
             user_data = {
                 "user": user,
-                "today_ordered": bool(today_order),
-                "today_meal": today_order.meal_name if today_order else None,
-                "tomorrow_ordered": bool(tomorrow_order),
-                "tomorrow_meal": tomorrow_order.meal_name if tomorrow_order else None,
+                "today_ordered": today_orders.exists(),
+                "today_meal": "; ".join(today_meals) if today_meals else None,
+                "tomorrow_ordered": tomorrow_orders.exists(),
+                "tomorrow_meal": "; ".join(tomorrow_meals) if tomorrow_meals else None,
             }
             users_with_status.append(user_data)
 
@@ -196,7 +214,6 @@ class AutoOrderView(View):
 
             meican_service = MeicanService()
             today = datetime.now().date()
-            tomorrow = today + timedelta(days=1)
 
             success_count = 0
             total_count = users.count()
@@ -204,77 +221,58 @@ class AutoOrderView(View):
 
             for user in users:
                 try:
-                    # 检查今日是否已点餐
-                    today_ordered = OrderRecord.objects.filter(
-                        user=user, order_date=today, success=True
-                    ).exists()
+                    # 尝试为今天订餐（让 meican_service 处理具体的时段检查）
+                    success, result_data, error = (
+                        meican_service.find_and_order_buffet(user.email)
+                    )
 
-                    if not today_ordered:
-                        # 尝试为今天订餐
-                        success, meal_name, error = (
-                            meican_service.find_and_order_buffet(user.email)
-                        )
-
-                        if success:
-                            OrderRecord.objects.create(
-                                user=user,
-                                order_date=today,
-                                meal_name=meal_name,
-                                success=True,
-                            )
-                            order_results.append(
-                                f"{user.email}: 今日订餐成功 - {meal_name}"
-                            )
+                    if success:
+                        # 处理今天的成功订单
+                        if 'successful_orders' in result_data and result_data['successful_orders']:
+                            for order_info in result_data['successful_orders']:
+                                if ': ' in order_info:
+                                    meal_period, meal_name = order_info.split(': ', 1)
+                                else:
+                                    meal_period = "未知时段"
+                                    meal_name = order_info
+                                
+                                OrderRecord.objects.update_or_create(
+                                    user=user,
+                                    order_date=today,
+                                    meal_period=meal_period,
+                                    defaults={
+                                        "meal_name": meal_name,
+                                        "success": True,
+                                        "error_message": None,
+                                    },
+                                )
+                                order_results.append(
+                                    f"{user.email}: 今日{meal_period}订餐成功 - {meal_name}"
+                                )
                             success_count += 1
-                        else:
-                            OrderRecord.objects.create(
-                                user=user,
-                                order_date=today,
-                                meal_name="",
-                                success=False,
-                                error_message=error,
-                            )
-                            order_results.append(
-                                f"{user.email}: 今日订餐失败 - {error}"
-                            )
+                        
+                        # 记录已有的订单信息
+                        if 'ordered_meals' in result_data and result_data['ordered_meals']:
+                            for meal_period in result_data['ordered_meals']:
+                                order_results.append(f"{user.email}: 今日{meal_period}已订餐")
+                            
+                        # 如果没有任何新订单但也没有错误，说明可能没有可用的自助餐
+                        if not result_data.get('successful_orders') and not result_data.get('ordered_meals'):
+                            order_results.append(f"{user.email}: 今日暂无可用的自助餐")
                     else:
-                        order_results.append(f"{user.email}: 今日已订餐")
-                        success_count += 1
-
-                    # 检查明日是否已点餐
-                    tomorrow_ordered = OrderRecord.objects.filter(
-                        user=user, order_date=tomorrow, success=True
-                    ).exists()
-
-                    if not tomorrow_ordered:
-                        # 尝试为明天订餐
-                        success, meal_name, error = (
-                            meican_service.find_and_order_buffet(user.email)
+                        OrderRecord.objects.update_or_create(
+                            user=user,
+                            order_date=today,
+                            meal_period="自动点餐",
+                            defaults={
+                                "meal_name": "",
+                                "success": False,
+                                "error_message": error,
+                            },
                         )
-
-                        if success:
-                            OrderRecord.objects.create(
-                                user=user,
-                                order_date=tomorrow,
-                                meal_name=meal_name,
-                                success=True,
-                            )
-                            order_results.append(
-                                f"{user.email}: 明日订餐成功 - {meal_name}"
-                            )
-                        else:
-                            OrderRecord.objects.create(
-                                user=user,
-                                order_date=tomorrow,
-                                meal_name="",
-                                success=False,
-                                error_message=error,
-                            )
-                            order_results.append(
-                                f"{user.email}: 明日订餐失败 - {error}"
-                            )
-                    else:
-                        order_results.append(f"{user.email}: 明日已订餐")
+                        order_results.append(
+                            f"{user.email}: 今日订餐失败 - {error}"
+                        )
 
                 except Exception as e:
                     order_results.append(f"{user.email}: 订餐异常 - {str(e)}")
@@ -313,23 +311,41 @@ class UsersApiView(View):
 
         users_data = []
         for user in users:
-            # 获取今天的订单状态
-            today_order = OrderRecord.objects.filter(
+            # 获取今天的所有成功订单
+            today_orders = OrderRecord.objects.filter(
                 user=user, order_date=today, success=True
-            ).first()
+            )
 
-            # 获取明天的订单状态
-            tomorrow_order = OrderRecord.objects.filter(
+            # 获取明天的所有成功订单
+            tomorrow_orders = OrderRecord.objects.filter(
                 user=user, order_date=tomorrow, success=True
-            ).first()
+            )
+
+            # 合并今天的订单信息
+            today_meals = []
+            if today_orders.exists():
+                for order in today_orders:
+                    if order.meal_period:
+                        today_meals.append(f"{order.meal_period}: {order.meal_name}")
+                    else:
+                        today_meals.append(order.meal_name)
+
+            # 合并明天的订单信息
+            tomorrow_meals = []
+            if tomorrow_orders.exists():
+                for order in tomorrow_orders:
+                    if order.meal_period:
+                        tomorrow_meals.append(f"{order.meal_period}: {order.meal_name}")
+                    else:
+                        tomorrow_meals.append(order.meal_name)
 
             user_data = {
                 "id": user.id,
                 "email": user.email,
-                "today_ordered": bool(today_order),
-                "today_meal": today_order.meal_name if today_order else None,
-                "tomorrow_ordered": bool(tomorrow_order),
-                "tomorrow_meal": tomorrow_order.meal_name if tomorrow_order else None,
+                "today_ordered": today_orders.exists(),
+                "today_meal": "; ".join(today_meals) if today_meals else None,
+                "tomorrow_ordered": tomorrow_orders.exists(),
+                "tomorrow_meal": "; ".join(tomorrow_meals) if tomorrow_meals else None,
             }
             users_data.append(user_data)
 
@@ -378,26 +394,48 @@ class CreateUserApiView(View):
                 email=email, token=token, last_login_attempt=timezone.now()
             )
 
-            # 立即尝试为新用户进行一次点餐（今天和明天）
+            # 立即尝试为新用户进行一次点餐（今天）
             today = datetime.now().date()
-            tomorrow = today + timedelta(days=1)
             order_results = []
 
             # 为今天订餐
             try:
-                today_success, today_meal, today_error = (
+                today_success, result_data, today_error = (
                     meican_service.find_and_order_buffet(email)
                 )
 
                 if today_success:
-                    OrderRecord.objects.create(
-                        user=user, order_date=today, meal_name=today_meal, success=True
-                    )
-                    order_results.append(f"今日订餐成功：{today_meal}")
+                    # 处理成功的新订单
+                    if 'successful_orders' in result_data and result_data['successful_orders']:
+                        for order_info in result_data['successful_orders']:
+                            if ': ' in order_info:
+                                meal_period, meal_name = order_info.split(': ', 1)
+                            else:
+                                meal_period = "未知时段"
+                                meal_name = order_info
+                            
+                            OrderRecord.objects.create(
+                                user=user,
+                                order_date=today,
+                                meal_period=meal_period,
+                                meal_name=meal_name,
+                                success=True
+                            )
+                            order_results.append(f"今日{meal_period}订餐成功：{meal_name}")
+                    
+                    # 记录已有的订单信息
+                    if 'ordered_meals' in result_data and result_data['ordered_meals']:
+                        for meal_period in result_data['ordered_meals']:
+                            order_results.append(f"今日{meal_period}已订餐")
+                    
+                    # 如果没有任何订单，说明暂无可用的自助餐
+                    if not result_data.get('successful_orders') and not result_data.get('ordered_meals'):
+                        order_results.append("今日暂无可用的自助餐")
                 else:
                     OrderRecord.objects.create(
                         user=user,
                         order_date=today,
+                        meal_period="自动点餐",
                         meal_name="",
                         success=False,
                         error_message=today_error,
@@ -405,32 +443,6 @@ class CreateUserApiView(View):
                     order_results.append(f"今日订餐失败：{today_error}")
             except Exception as today_e:
                 order_results.append(f"今日订餐异常：{str(today_e)}")
-
-            # 为明天订餐
-            try:
-                tomorrow_success, tomorrow_meal, tomorrow_error = (
-                    meican_service.find_and_order_buffet(email)
-                )
-
-                if tomorrow_success:
-                    OrderRecord.objects.create(
-                        user=user,
-                        order_date=tomorrow,
-                        meal_name=tomorrow_meal,
-                        success=True,
-                    )
-                    order_results.append(f"明日订餐成功：{tomorrow_meal}")
-                else:
-                    OrderRecord.objects.create(
-                        user=user,
-                        order_date=tomorrow,
-                        meal_name="",
-                        success=False,
-                        error_message=tomorrow_error,
-                    )
-                    order_results.append(f"明日订餐失败：{tomorrow_error}")
-            except Exception as tomorrow_e:
-                order_results.append(f"明日订餐异常：{str(tomorrow_e)}")
 
             # 构建响应消息
             result_message = (
