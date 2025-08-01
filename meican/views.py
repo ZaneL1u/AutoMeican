@@ -18,46 +18,81 @@ class MeicanUsersView(View):
         """
         users = MeicanUser.objects.all()
 
-        # 为每个用户添加今天和明天的订单状态
+        # 为每个用户添加今天和以后的 Tab 状态及订单状态
         today = datetime.now().date()
-        tomorrow = today + timedelta(days=1)
 
         users_with_status = []
         for user in users:
-            # 获取今天的所有成功订单
-            today_orders = OrderRecord.objects.filter(
-                user=user, order_date=today, success=True
-            )
+            # 获取该用户今天及以后的所有 Tab 状态
+            from .models import TabStatus
 
-            # 获取明天的所有成功订单
-            tomorrow_orders = OrderRecord.objects.filter(
-                user=user, order_date=tomorrow, success=True
-            )
+            user_tabs = TabStatus.objects.filter(
+                user=user, order_date__gte=today
+            ).order_by("order_date", "target_time")
 
-            # 合并今天的订单信息
+            # 获取今天及以后的所有成功订单
+            user_orders = OrderRecord.objects.filter(
+                user=user, order_date__gte=today, success=True
+            ).order_by("order_date", "meal_period")
+
+            # 按日期分组 Tab 状态
+            tabs_by_date = {}
+            for tab in user_tabs:
+                date_str = tab.order_date.isoformat()
+                if date_str not in tabs_by_date:
+                    tabs_by_date[date_str] = []
+                tabs_by_date[date_str].append(
+                    {
+                        "title": tab.tab_title,
+                        "status": tab.status,
+                        "target_time": tab.target_time,
+                        "has_buffet": "自助" in tab.tab_title,
+                    }
+                )
+
+            # 按日期分组订单
+            orders_by_date = {}
+            for order in user_orders:
+                date_str = order.order_date.isoformat()
+                if date_str not in orders_by_date:
+                    orders_by_date[date_str] = []
+                orders_by_date[date_str].append(
+                    {"meal_period": order.meal_period, "meal_name": order.meal_name}
+                )
+
+            # 统计今天和明天的状态（为了兼容现有模板）
+            today_str = today.isoformat()
+            tomorrow_str = (today + timedelta(days=1)).isoformat()
+
+            today_orders = orders_by_date.get(today_str, [])
+            tomorrow_orders = orders_by_date.get(tomorrow_str, [])
+
             today_meals = []
-            if today_orders.exists():
-                for order in today_orders:
-                    if order.meal_period:
-                        today_meals.append(f"{order.meal_period}: {order.meal_name}")
-                    else:
-                        today_meals.append(order.meal_name)
+            for order in today_orders:
+                if order["meal_period"]:
+                    today_meals.append(f"{order['meal_period']}: {order['meal_name']}")
+                else:
+                    today_meals.append(order["meal_name"])
 
-            # 合并明天的订单信息
             tomorrow_meals = []
-            if tomorrow_orders.exists():
-                for order in tomorrow_orders:
-                    if order.meal_period:
-                        tomorrow_meals.append(f"{order.meal_period}: {order.meal_name}")
-                    else:
-                        tomorrow_meals.append(order.meal_name)
+            for order in tomorrow_orders:
+                if order["meal_period"]:
+                    tomorrow_meals.append(
+                        f"{order['meal_period']}: {order['meal_name']}"
+                    )
+                else:
+                    tomorrow_meals.append(order["meal_name"])
 
             user_data = {
                 "user": user,
-                "today_ordered": today_orders.exists(),
+                "today_ordered": len(today_orders) > 0,
                 "today_meal": "; ".join(today_meals) if today_meals else None,
-                "tomorrow_ordered": tomorrow_orders.exists(),
+                "tomorrow_ordered": len(tomorrow_orders) > 0,
                 "tomorrow_meal": "; ".join(tomorrow_meals) if tomorrow_meals else None,
+                "tabs_by_date": tabs_by_date,
+                "orders_by_date": orders_by_date,
+                "tab_status_count": user_tabs.count(),
+                "order_count": user_orders.count(),
             }
             users_with_status.append(user_data)
 
@@ -67,7 +102,7 @@ class MeicanUsersView(View):
             {
                 "users_with_status": users_with_status,
                 "today": today,
-                "tomorrow": tomorrow,
+                "tomorrow": today + timedelta(days=1),
             },
         )
 
@@ -102,52 +137,68 @@ class MeicanUsersView(View):
                 email=email, token=token, last_login_attempt=timezone.now()
             )
 
-            # 立即尝试为新用户进行一次点餐（今天和明天）
+            # 立即尝试为新用户进行一次点餐
             order_results = []
 
-            # 调用订餐方法，该方法会自动处理今天和明天的订餐
-            # 并在内部创建相应的 OrderRecord
+            # 调用订餐方法
             try:
-                success, meal_name, error = meican_service.find_and_order_buffet(email)
+                success, result_data, error = meican_service.find_and_order_buffet(
+                    email
+                )
 
                 if success:
-                    if meal_name:
-                        order_results.append(f"订餐成功：{meal_name}")
-                    else:
-                        order_results.append("订餐状态已更新")
+                    # 处理成功的新订单
+                    successful_orders = result_data.get("successful_orders", [])
+                    if successful_orders:
+                        for order_info in successful_orders:
+                            order_results.append(f"订餐成功：{order_info}")
+
+                    # 处理已有的订单信息
+                    ordered_meals = result_data.get("ordered_meals", [])
+                    if ordered_meals:
+                        for meal_period in ordered_meals:
+                            order_results.append(f"已订餐：{meal_period}")
+
+                    # 如果没有任何订单，说明暂无可用的自助餐
+                    if not successful_orders and not ordered_meals:
+                        order_results.append("暂无可用的自助餐")
                 else:
-                    order_results.append(f"订餐失败：{error}")
+                    # 区分真正的错误和正常状态
+                    if "暂无" in error or "没有找到" in error or "不可" in error:
+                        order_results.append("暂无可用的自助餐")
+                    else:
+                        order_results.append(f"订餐失败：{error}")
 
             except Exception as e:
                 order_results.append(f"订餐异常：{str(e)}")
 
-            # 额外查询一下当前的订单状态，确保用户能看到完整信息
-            try:
-                status_success, status_info, status_error = (
-                    meican_service.query_and_update_order_status(email)
-                )
-                if status_success and "updated_records" in status_info:
-                    updated_records = status_info.get("updated_records", [])
-                    if updated_records:
-                        order_results.extend(updated_records)
-            except Exception:
-                # 状态查询失败不影响主要流程
-                pass
-
             # 根据订餐结果显示相应的消息
-            result_message = (
-                f"用户 {email} 创建成功！已通过美餐登录验证。"
-                + " | ".join(order_results)
+            if order_results:
+                result_message = (
+                    f"用户 {email} 创建成功！已通过美餐登录验证。"
+                    + " | ".join(order_results)
+                )
+            else:
+                result_message = f"用户 {email} 创建成功！已通过美餐登录验证。"
+
+            # 判断消息类型 - 优化消息分类
+            has_success = any("成功" in result for result in order_results)
+            has_ordered = any("已订餐" in result for result in order_results)
+            has_no_buffet = any("暂无" in result for result in order_results)
+            has_error = any(
+                "失败" in result or "异常" in result for result in order_results
             )
 
-            # 判断消息类型
-            if any("成功" in result for result in order_results):
-                if all("成功" in result for result in order_results):
-                    messages.success(request, result_message)
-                else:
-                    messages.warning(request, result_message)
-            else:
+            if has_success:
+                messages.success(request, result_message)
+            elif has_ordered or has_no_buffet:
+                messages.success(
+                    request, result_message
+                )  # 已订餐和暂无可用也算正常情况
+            elif has_error:
                 messages.warning(request, result_message)
+            else:
+                messages.success(request, result_message)
 
         except Exception as e:
             messages.error(request, f"创建用户时发生错误：{str(e)}")
@@ -174,28 +225,45 @@ class DeleteUserView(View):
 class UpdateOrderStatusView(View):
     def post(self, request, user_id):
         """
-        更新指定用户的订单状态
+        刷新指定用户的状态：重新获取 Tab 状态并同步到数据库
         """
         try:
             user = get_object_or_404(MeicanUser, id=user_id)
 
             meican_service = MeicanService()
-            success, status_info, error = meican_service.query_and_update_order_status(
-                user.email
-            )
+
+            # 使用新的刷新方法：登录 + 同步 Tab 状态 + 批量订餐
+            success, result_info, error = meican_service.refresh_user_status(user)
 
             if success:
-                updated_records = status_info.get("updated_records", [])
-                if updated_records:
-                    message = f"用户 {user.email} 订单状态已更新: {', '.join(updated_records)}"
-                    messages.success(request, message)
-                else:
-                    messages.info(request, f"用户 {user.email} 订单状态无需更新")
+                # 提取有用的信息给用户
+                sync_info = result_info.get("sync_info", {})
+                order_info = result_info.get("order_info", {})
+
+                synced_tabs = sync_info.get("synced_tabs", [])
+                order_summary = order_info.get("summary", {})
+
+                message_parts = []
+                message_parts.append(f"已同步 {len(synced_tabs)} 个时段状态")
+
+                if order_summary:
+                    successful_count = order_summary.get("successful_count", 0)
+                    already_ordered_count = order_summary.get(
+                        "already_ordered_count", 0
+                    )
+
+                    if successful_count > 0:
+                        message_parts.append(f"新订餐: {successful_count} 个")
+                    if already_ordered_count > 0:
+                        message_parts.append(f"已有订单: {already_ordered_count} 个")
+
+                message = f"用户 {user.email} 状态已刷新 - " + "; ".join(message_parts)
+                messages.success(request, message)
             else:
-                messages.error(request, f"更新用户 {user.email} 订单状态失败: {error}")
+                messages.error(request, f"刷新用户 {user.email} 状态失败: {error}")
 
         except Exception as e:
-            messages.error(request, f"更新订单状态时发生错误: {str(e)}")
+            messages.error(request, f"刷新状态时发生错误: {str(e)}")
 
         return redirect("get_meican_users")
 
@@ -215,27 +283,40 @@ class AutoOrderView(View):
             meican_service = MeicanService()
             today = datetime.now().date()
 
-            success_count = 0
+            # 统计各种状态的用户数量
+            new_order_count = 0  # 有新订单的用户
+            already_ordered_count = 0  # 全部已订餐的用户
+            no_buffet_count = 0  # 没有可用自助餐的用户
+            error_count = 0  # 真正出错的用户
             total_count = users.count()
-            order_results = []
+
+            order_details = []
 
             for user in users:
+                user_has_new_order = False
+                user_all_ordered = False
+                user_no_buffet = False
+                user_has_error = False
+
                 try:
-                    # 尝试为今天订餐（让 meican_service 处理具体的时段检查）
-                    success, result_data, error = (
-                        meican_service.find_and_order_buffet(user.email)
+                    # 尝试为用户订餐
+                    success, result_data, error = meican_service.find_and_order_buffet(
+                        user.email
                     )
 
                     if success:
-                        # 处理今天的成功订单
-                        if 'successful_orders' in result_data and result_data['successful_orders']:
-                            for order_info in result_data['successful_orders']:
-                                if ': ' in order_info:
-                                    meal_period, meal_name = order_info.split(': ', 1)
+                        # 处理成功的新订单
+                        successful_orders = result_data.get("successful_orders", [])
+                        if successful_orders:
+                            user_has_new_order = True
+                            for order_info in successful_orders:
+                                if ": " in order_info:
+                                    meal_period, meal_name = order_info.split(": ", 1)
                                 else:
                                     meal_period = "未知时段"
                                     meal_name = order_info
-                                
+
+                                # 更新数据库记录
                                 OrderRecord.objects.update_or_create(
                                     user=user,
                                     order_date=today,
@@ -246,20 +327,32 @@ class AutoOrderView(View):
                                         "error_message": None,
                                     },
                                 )
-                                order_results.append(
-                                    f"{user.email}: 今日{meal_period}订餐成功 - {meal_name}"
+                                order_details.append(
+                                    f"{user.email}: 新订餐成功 - {meal_period}: {meal_name}"
                                 )
-                            success_count += 1
-                        
-                        # 记录已有的订单信息
-                        if 'ordered_meals' in result_data and result_data['ordered_meals']:
-                            for meal_period in result_data['ordered_meals']:
-                                order_results.append(f"{user.email}: 今日{meal_period}已订餐")
-                            
-                        # 如果没有任何新订单但也没有错误，说明可能没有可用的自助餐
-                        if not result_data.get('successful_orders') and not result_data.get('ordered_meals'):
-                            order_results.append(f"{user.email}: 今日暂无可用的自助餐")
+
+                        # 处理已有的订单
+                        ordered_meals = result_data.get("ordered_meals", [])
+                        if ordered_meals:
+                            # 如果只有已订餐，没有新订单，认为是全部已订餐
+                            if not successful_orders:
+                                user_all_ordered = True
+                            for meal_period in ordered_meals:
+                                order_details.append(
+                                    f"{user.email}: 已订餐 - {meal_period}"
+                                )
+
+                        # 如果既没有新订单也没有已有订单，说明没有可用的自助餐
+                        if not successful_orders and not ordered_meals:
+                            user_no_buffet = True
+                            order_details.append(
+                                f"{user.email}: 当前时段暂无可用的自助餐"
+                            )
+
                     else:
+                        # 处理失败情况
+                        user_has_error = True
+                        # 记录失败到数据库
                         OrderRecord.objects.update_or_create(
                             user=user,
                             order_date=today,
@@ -270,29 +363,77 @@ class AutoOrderView(View):
                                 "error_message": error,
                             },
                         )
-                        order_results.append(
-                            f"{user.email}: 今日订餐失败 - {error}"
-                        )
+                        order_details.append(f"{user.email}: 订餐失败 - {error}")
 
                 except Exception as e:
-                    order_results.append(f"{user.email}: 订餐异常 - {str(e)}")
+                    user_has_error = True
+                    order_details.append(f"{user.email}: 订餐异常 - {str(e)}")
+
+                # 统计用户状态
+                if user_has_new_order:
+                    new_order_count += 1
+                elif user_all_ordered:
+                    already_ordered_count += 1
+                elif user_no_buffet:
+                    no_buffet_count += 1
+                elif user_has_error:
+                    error_count += 1
 
             # 构建响应消息
-            if success_count > 0:
-                message = (
-                    f"自助点餐完成！成功为 {success_count}/{total_count} 位用户处理订餐"
-                )
-                return JsonResponse(
-                    {"success": True, "message": message, "details": order_results}
-                )
+            message_parts = []
+
+            if new_order_count > 0:
+                message_parts.append(f"新订餐: {new_order_count}人")
+
+            if already_ordered_count > 0:
+                message_parts.append(f"已订餐: {already_ordered_count}人")
+
+            if no_buffet_count > 0:
+                message_parts.append(f"暂无可用自助餐: {no_buffet_count}人")
+
+            if error_count > 0:
+                message_parts.append(f"失败: {error_count}人")
+
+            # 判断整体操作是否成功
+            # 只要不是所有用户都出错，就认为操作成功
+            is_success = error_count < total_count
+
+            if is_success:
+                if new_order_count > 0:
+                    main_message = (
+                        f"自助点餐完成！共处理 {total_count} 位用户，"
+                        + "，".join(message_parts)
+                    )
+                elif already_ordered_count + no_buffet_count == total_count:
+                    main_message = (
+                        f"自助点餐检查完成！共处理 {total_count} 位用户，"
+                        + "，".join(message_parts)
+                    )
+                else:
+                    main_message = (
+                        f"自助点餐处理完成！共处理 {total_count} 位用户，"
+                        + "，".join(message_parts)
+                    )
             else:
-                return JsonResponse(
-                    {
-                        "success": False,
-                        "message": "所有用户订餐都失败了",
-                        "details": order_results,
-                    }
+                main_message = (
+                    f"自助点餐部分失败！共处理 {total_count} 位用户，"
+                    + "，".join(message_parts)
                 )
+
+            return JsonResponse(
+                {
+                    "success": is_success,
+                    "message": main_message,
+                    "details": order_details,
+                    "summary": {
+                        "total": total_count,
+                        "new_orders": new_order_count,
+                        "already_ordered": already_ordered_count,
+                        "no_buffet": no_buffet_count,
+                        "errors": error_count,
+                    },
+                }
+            )
 
         except Exception as e:
             return JsonResponse(
@@ -406,49 +547,75 @@ class CreateUserApiView(View):
 
                 if today_success:
                     # 处理成功的新订单
-                    if 'successful_orders' in result_data and result_data['successful_orders']:
-                        for order_info in result_data['successful_orders']:
-                            if ': ' in order_info:
-                                meal_period, meal_name = order_info.split(': ', 1)
+                    successful_orders = result_data.get("successful_orders", [])
+                    if successful_orders:
+                        for order_info in successful_orders:
+                            if ": " in order_info:
+                                meal_period, meal_name = order_info.split(": ", 1)
                             else:
                                 meal_period = "未知时段"
                                 meal_name = order_info
-                            
+
                             OrderRecord.objects.create(
                                 user=user,
                                 order_date=today,
                                 meal_period=meal_period,
                                 meal_name=meal_name,
-                                success=True
+                                success=True,
                             )
-                            order_results.append(f"今日{meal_period}订餐成功：{meal_name}")
-                    
+                            order_results.append(
+                                f"今日{meal_period}订餐成功：{meal_name}"
+                            )
+
                     # 记录已有的订单信息
-                    if 'ordered_meals' in result_data and result_data['ordered_meals']:
-                        for meal_period in result_data['ordered_meals']:
+                    ordered_meals = result_data.get("ordered_meals", [])
+                    if ordered_meals:
+                        for meal_period in ordered_meals:
                             order_results.append(f"今日{meal_period}已订餐")
-                    
+
                     # 如果没有任何订单，说明暂无可用的自助餐
-                    if not result_data.get('successful_orders') and not result_data.get('ordered_meals'):
+                    if not successful_orders and not ordered_meals:
                         order_results.append("今日暂无可用的自助餐")
                 else:
-                    OrderRecord.objects.create(
-                        user=user,
-                        order_date=today,
-                        meal_period="自动点餐",
-                        meal_name="",
-                        success=False,
-                        error_message=today_error,
-                    )
-                    order_results.append(f"今日订餐失败：{today_error}")
+                    # 区分真正的错误和正常状态
+                    if (
+                        "暂无" in today_error
+                        or "没有找到" in today_error
+                        or "不可" in today_error
+                    ):
+                        order_results.append("今日暂无可用的自助餐")
+                    else:
+                        OrderRecord.objects.create(
+                            user=user,
+                            order_date=today,
+                            meal_period="自动点餐",
+                            meal_name="",
+                            success=False,
+                            error_message=today_error,
+                        )
+                        order_results.append(f"今日订餐失败：{today_error}")
             except Exception as today_e:
                 order_results.append(f"今日订餐异常：{str(today_e)}")
 
-            # 构建响应消息
-            result_message = (
-                f"用户 {email} 创建成功！已通过美餐登录验证。"
-                + " | ".join(order_results)
-            )
+            # 构建响应消息 - 优化消息类型判断
+            has_success = any("成功" in result for result in order_results)
+            has_ordered = any("已订餐" in result for result in order_results)
+            has_no_buffet = any("暂无" in result for result in order_results)
+
+            if order_results:
+                order_summary = " | ".join(order_results)
+                if has_success or has_ordered or has_no_buffet:
+                    # 有正常结果（成功、已订餐或暂无可用）
+                    result_message = (
+                        f"用户 {email} 创建成功！已通过美餐登录验证。{order_summary}"
+                    )
+                else:
+                    # 只有错误
+                    result_message = (
+                        f"用户 {email} 创建成功，但订餐遇到问题：{order_summary}"
+                    )
+            else:
+                result_message = f"用户 {email} 创建成功！已通过美餐登录验证。"
 
             return JsonResponse(
                 {

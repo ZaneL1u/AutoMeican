@@ -374,7 +374,7 @@ LOGGING = {
         'file': {
             'level': 'INFO',
             'class': 'logging.FileHandler',
-            'filename': '/app/data/logs/meican_orders.log',
+            'filename': 'data/logs/meican_orders.log',
             'encoding': 'utf-8',
         },
     },

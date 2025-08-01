@@ -142,6 +142,10 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 MEICAN_GLOBAL_PASSWORD = os.environ.get("MEICAN_GLOBAL_PASSWORD", "default")
 
 # 日志配置
+# 确保日志目录存在
+LOG_DIR = BASE_DIR / "data" / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -159,7 +163,7 @@ LOGGING = {
         "file": {
             "level": "INFO",
             "class": "logging.FileHandler",
-            "filename": "/app/data/logs/meican_orders.log",
+            "filename": LOG_DIR / "meican_orders.log",
             "formatter": "verbose",
         },
         "console": {
