@@ -14,7 +14,6 @@ class TabStatus(Enum):
     NOT_YET = "NOT_YET"
     UNKNOWN = "UNKNOWN"
     ORDERED = "ORDERED"
-    ORDER = "ORDER"
 
     @classmethod
     def parse(cls, string_value):

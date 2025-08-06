@@ -61,16 +61,18 @@ class MeicanService:
             today = datetime.now().date()
 
             # 清除该用户今天及以后的所有 Tab 状态记录
-            TabStatus.objects.filter(
-                user=user, 
-                order_date__gte=today
-            ).delete()
+            TabStatus.objects.filter(user=user, order_date__gte=today).delete()
+
+            # 同时清除今天及以后的 OrderRecord，以确保数据一致性
+            from .models import OrderRecord
+
+            OrderRecord.objects.filter(user=user, order_date__gte=today).delete()
 
             for tab in all_tabs:
                 try:
                     # 计算对应的用餐日期
                     order_date = tab.target_time.date()
-                    
+
                     # 只同步今天及以后的 Tab
                     if order_date < today:
                         continue
@@ -92,17 +94,37 @@ class MeicanService:
                             "tab_title": tab.title,
                             "target_time": tab.target_time,
                             "status": status_value,
+                        },
+                    )
+
+                    # 如果状态为已点餐，同时创建对应的 OrderRecord 记录
+                    if status_value == "ORDERED":
+                        # 创建订单记录，菜品名称使用占位符（因为无法从Tab状态获取具体菜品）
+                        OrderRecord.objects.create(
+                            user=user,
+                            order_date=order_date,
+                            meal_period=tab.title,
+                            meal_name="已点餐（从美餐同步）",
+                            success=True,
+                            error_message=None,
+                            tab_uid=tab.uid,
+                        )
+                        logger.info(
+                            f"用户 {user.email} 时段 {tab.title} 已有订单，已同步到本地"
+                        )
+
+                    synced_tabs.append(
+                        {
+                            "tab_title": tab.title,
+                            "order_date": order_date.isoformat(),
+                            "status": status_value,
+                            "created": created,
                         }
                     )
 
-                    synced_tabs.append({
-                        "tab_title": tab.title,
-                        "order_date": order_date.isoformat(),
-                        "status": status_value,
-                        "created": created
-                    })
-
-                    logger.info(f"用户 {user.email} Tab '{tab.title}' 状态已同步: {status_value}")
+                    logger.info(
+                        f"用户 {user.email} Tab '{tab.title}' 状态已同步: {status_value}"
+                    )
 
                 except Exception as tab_error:
                     logger.error(f"同步 Tab {tab.title} 状态时出错: {tab_error}")
@@ -151,38 +173,50 @@ class MeicanService:
                 order_date = tab.target_time.date()
 
                 # 如果这个时段已经订过餐，跳过
-                if status_value in ["ORDERED", "ORDER"]:
-                    already_ordered.append({
-                        "tab_title": tab.title,
-                        "order_date": order_date.isoformat(),
-                        "status": status_value
-                    })
+                if status_value == "ORDERED":
+                    already_ordered.append(
+                        {
+                            "tab_title": tab.title,
+                            "order_date": order_date.isoformat(),
+                            "status": status_value,
+                        }
+                    )
                     logger.info(f"时段 {tab.title} 已订餐，跳过")
                     continue
 
                 # 如果这个时段不可用，跳过
                 if status_value not in ["AVAILABLE", "AVAIL"]:
-                    unavailable_tabs.append({
-                        "tab_title": tab.title,
-                        "order_date": order_date.isoformat(),
-                        "status": status_value
-                    })
-                    logger.info(f"时段 {tab.title} 不可订餐 (状态: {status_value})，跳过")
+                    unavailable_tabs.append(
+                        {
+                            "tab_title": tab.title,
+                            "order_date": order_date.isoformat(),
+                            "status": status_value,
+                        }
+                    )
+                    logger.info(
+                        f"时段 {tab.title} 不可订餐 (状态: {status_value})，跳过"
+                    )
                     continue
 
                 # 尝试下单
                 order_success, meal_name, error = self._order_buffet_for_tab(tab, user)
-                
+
                 if order_success:
-                    successful_orders.append({
-                        "tab_title": tab.title,
-                        "order_date": order_date.isoformat(),
-                        "meal_name": meal_name,
-                        "tab_uid": tab.uid
-                    })
-                    logger.info(f"用户 {user.email} 在时段 {tab.title} 成功下单: {meal_name}")
+                    successful_orders.append(
+                        {
+                            "tab_title": tab.title,
+                            "order_date": order_date.isoformat(),
+                            "meal_name": meal_name,
+                            "tab_uid": tab.uid,
+                        }
+                    )
+                    logger.info(
+                        f"用户 {user.email} 在时段 {tab.title} 成功下单: {meal_name}"
+                    )
                 else:
-                    logger.error(f"用户 {user.email} 在时段 {tab.title} 下单失败: {error}")
+                    logger.error(
+                        f"用户 {user.email} 在时段 {tab.title} 下单失败: {error}"
+                    )
 
             # 汇总结果
             order_results = {
@@ -192,8 +226,8 @@ class MeicanService:
                 "summary": {
                     "successful_count": len(successful_orders),
                     "already_ordered_count": len(already_ordered),
-                    "unavailable_count": len(unavailable_tabs)
-                }
+                    "unavailable_count": len(unavailable_tabs),
+                },
             }
 
             return True, order_results, None
@@ -231,8 +265,9 @@ class MeicanService:
 
             # 记录到数据库
             from .models import OrderRecord
+
             order_date = tab.target_time.date()
-            
+
             OrderRecord.objects.update_or_create(
                 user=user,
                 order_date=order_date,
@@ -250,12 +285,13 @@ class MeicanService:
         except Exception as e:
             error_msg = f"下单失败: {str(e)}"
             logger.error(f"时段 {tab.title} 订餐失败: {e}")
-            
+
             # 记录失败的订单
             try:
                 from .models import OrderRecord
+
                 order_date = tab.target_time.date()
-                
+
                 OrderRecord.objects.update_or_create(
                     user=user,
                     order_date=order_date,
@@ -269,7 +305,7 @@ class MeicanService:
                 )
             except Exception as db_error:
                 logger.error(f"记录失败订单时出错: {db_error}")
-            
+
             return False, None, error_msg
 
     def refresh_user_status(self, user):
@@ -291,14 +327,16 @@ class MeicanService:
                 return False, {}, f"同步状态失败: {sync_error}"
 
             # 3. 尝试订餐所有可用的自助餐
-            order_success, order_info, order_error = self.order_all_available_buffets(user)
-            
+            order_success, order_info, order_error = self.order_all_available_buffets(
+                user
+            )
+
             # 汇总结果
             result_info = {
                 "user_email": user.email,
                 "sync_info": sync_info,
                 "order_info": order_info,
-                "refresh_time": datetime.now().isoformat()
+                "refresh_time": datetime.now().isoformat(),
             }
 
             if not order_success:
@@ -322,6 +360,7 @@ class MeicanService:
             # 如果提供了邮箱，先获取用户对象
             if email:
                 from .models import MeicanUser
+
                 try:
                     user = MeicanUser.objects.get(email=email)
                 except MeicanUser.DoesNotExist:
@@ -339,28 +378,36 @@ class MeicanService:
 
             # 同步状态并订餐
             sync_success, sync_info, sync_error = self.sync_user_tabs_status(user)
-            order_success, order_info, order_error = self.order_all_available_buffets(user)
+            order_success, order_info, order_error = self.order_all_available_buffets(
+                user
+            )
 
             if order_success:
                 summary = order_info.get("summary", {})
                 successful_count = summary.get("successful_count", 0)
                 already_ordered_count = summary.get("already_ordered_count", 0)
-                
+
                 messages = []
                 if successful_count > 0:
                     messages.append(f"新订餐成功: {successful_count} 个时段")
                 if already_ordered_count > 0:
                     messages.append(f"已有订单: {already_ordered_count} 个时段")
-                
+
                 message = "; ".join(messages) if messages else "没有找到可订购的自助餐"
-                
+
                 # 返回兼容格式
                 return_data = {
-                    'successful_orders': [f"{item['tab_title']}: {item['meal_name']}" for item in order_info.get("successful_orders", [])],
-                    'ordered_meals': [item['tab_title'] for item in order_info.get("already_ordered", [])],
-                    'message': message
+                    "successful_orders": [
+                        f"{item['tab_title']}: {item['meal_name']}"
+                        for item in order_info.get("successful_orders", [])
+                    ],
+                    "ordered_meals": [
+                        item["tab_title"]
+                        for item in order_info.get("already_ordered", [])
+                    ],
+                    "message": message,
                 }
-                
+
                 return True, return_data, ""
             else:
                 return False, order_error if order_error else "订餐失败"
@@ -423,56 +470,3 @@ class MeicanService:
         except Exception as e:
             logger.error(f"获取菜品信息失败: {e}")
             return None, f"获取菜品信息失败: {str(e)}"
-
-    def query_and_update_order_status(self, email=None, password=None):
-        """
-        查询订单状态（兼容性方法，已被新的同步方法替代）
-        :param email: 邮箱（可选，如果未提供则需要先调用login）
-        :param password: 密码
-        :return: (success, status_info, error_message)
-        """
-        try:
-            # 如果提供了邮箱，先登录
-            if email:
-                success, _, error = self.login(email, password)
-                if not success:
-                    return False, {}, error
-
-            # 确保已登录
-            if not self.meican_client:
-                return False, {}, "未登录"
-
-            # 获取订单状态
-            order_status = self.meican_client.get_order_status()
-
-            # 更新数据库中的记录
-            if email:
-                from .models import MeicanUser, OrderRecord
-                try:
-                    user = MeicanUser.objects.get(email=email)
-                    
-                    # 使用新的同步方法
-                    sync_success, sync_info, sync_error = self.sync_user_tabs_status(user)
-                    
-                    return (
-                        True,
-                        {
-                            "order_status": order_status,
-                            "updated_records": [f"已同步 {len(sync_info.get('synced_tabs', []))} 个 Tab 状态"],
-                        },
-                        None,
-                    )
-
-                except Exception as db_error:
-                    logger.error(f"更新数据库记录失败: {db_error}")
-                    return (
-                        True,
-                        {"order_status": order_status},
-                        f"数据库更新失败: {str(db_error)}",
-                    )
-
-            return True, {"order_status": order_status}, None
-
-        except Exception as e:
-            logger.error(f"查询订单状态失败: {e}")
-            return False, {}, f"查询订单状态失败: {str(e)}"
